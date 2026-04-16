@@ -1,8 +1,12 @@
 import axios from 'axios';
 import io from 'socket.io-client';
 
-const API_URL = 'http://localhost:3000/api';
-const SOCKET_URL = 'http://localhost:3000';
+const isWeb = typeof window !== 'undefined';
+const DEFAULT_API_URL = isWeb ? '/api' : 'http://localhost:3000/api';
+const DEFAULT_SOCKET_URL = isWeb ? undefined : 'http://localhost:3000';
+
+const API_URL = process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL;
+const SOCKET_URL = process.env.EXPO_PUBLIC_SOCKET_URL || DEFAULT_SOCKET_URL;
 
 export const api = axios.create({
   baseURL: API_URL,
@@ -11,7 +15,7 @@ export const api = axios.create({
   },
 });
 
-export const socket = io(SOCKET_URL, {
+export const socket = io(SOCKET_URL || undefined, {
   autoConnect: false,
 });
 

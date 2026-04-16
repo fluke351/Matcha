@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: matcha
+    env: node
+    plan: free
+    rootDir: backend
+    buildCommand: npm ci && cd ../frontend && npm ci && npx expo export --platform web && cd ../backend
+    startCommand: npm start
+    healthCheckPath: /api/interests
+    envVars:
+      - key: NODE_ENV
+        value: production

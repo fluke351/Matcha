@@ -1,10 +1,10 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, ActivityIndicator, Alert, ScrollView } from 'react-native';
 import * as Location from 'expo-location';
 import { LinearGradient } from 'expo-linear-gradient';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useApp } from '../context/AppContext';
-import { userApi } from '../services/api';
+import { socket, userApi } from '../services/api';
 import { COLORS, ROUNDED, SPACING } from '../theme';
 
 const DISTANCES = [
@@ -18,6 +18,37 @@ const HomeScreen = ({ navigation }) => {
   const { state, dispatch } = useApp();
   const [radius, setRadius] = useState(10);
   const [isFinding, setIsFinding] = useState(false);
+  const [isWaiting, setIsWaiting] = useState(false);
+
+  useEffect(() => {
+    if (!isWaiting || !state.user?.userId) return;
+
+    const handleMatchFound = (match) => {
+      if (!match) return;
+      dispatch({ type: 'SET_MATCH', payload: match });
+      dispatch({ type: 'ADD_MATCH', payload: match });
+      setIsWaiting(false);
+      navigation.navigate('MatchFound');
+    };
+
+    socket.connect();
+    socket.emit('register', state.user.userId);
+    socket.on('match_found', handleMatchFound);
+
+    return () => {
+      socket.off('match_found', handleMatchFound);
+    };
+  }, [isWaiting, state.user?.userId]);
+
+  const handleCancelWait = async () => {
+    try {
+      if (!state.user?.userId) return;
+      await userApi.findMatch(state.user.userId, 0, 0, radius, { cancel: 1 });
+    } catch (e) {
+    } finally {
+      setIsWaiting(false);
+    }
+  };
 
   const handleFindMatch = async () => {
     try {
@@ -46,7 +77,7 @@ const HomeScreen = ({ navigation }) => {
           dispatch({ type: 'ADD_MATCH', payload: response.data.match });
           navigation.navigate('MatchFound');
         } else {
-          Alert.alert('ไม่พบเพื่อนใหม่', 'ลองเพิ่มระยะทางหรือเปลี่ยนความสนใจดูนะ 🍵');
+          setIsWaiting(true);
         }
       }
     } catch (error) {
@@ -141,7 +172,7 @@ const HomeScreen = ({ navigation }) => {
             <View style={styles.actionCard}>
               <Text style={styles.actionTitle}>พร้อมหาเพื่อนใหม่แล้วไหม</Text>
               <Text style={styles.actionSubtitle}>
-                {isFinding ? 'กำลังค้นหาเพื่อนใหม่ใกล้ตัว...' : 'แตะปุ่มด้านล่างเพื่อเริ่มค้นหา'}
+                {isWaiting ? 'กำลังรอเพื่อนใหม่กดหาอยู่...' : isFinding ? 'กำลังค้นหาเพื่อนใหม่ใกล้ตัว...' : 'แตะปุ่มด้านล่างเพื่อเริ่มค้นหา'}
               </Text>
 
               <View style={styles.findButtonWrapper}>
@@ -152,12 +183,12 @@ const HomeScreen = ({ navigation }) => {
                   style={styles.findButtonOuter}
                 >
                   <TouchableOpacity
-                    style={[styles.findButton, isFinding && styles.findButtonDisabled]}
+                    style={[styles.findButton, (isFinding || isWaiting) && styles.findButtonDisabled]}
                     onPress={handleFindMatch}
-                    disabled={isFinding}
+                    disabled={isFinding || isWaiting}
                     activeOpacity={0.9}
                   >
-                    {isFinding ? (
+                    {isFinding || isWaiting ? (
                       <ActivityIndicator color="#FFFFFF" size="large" />
                     ) : (
                       <View style={styles.buttonContent}>
@@ -170,6 +201,11 @@ const HomeScreen = ({ navigation }) => {
                 </LinearGradient>
               </View>
               <Text style={styles.actionHint}>กำลังค้นหาในระยะ {radius >= 1000 ? 'ไม่จำกัด' : `${radius} km`}</Text>
+              {isWaiting && (
+                <TouchableOpacity style={styles.cancelWaitButton} onPress={handleCancelWait} activeOpacity={0.85}>
+                  <Text style={styles.cancelWaitText}>ยกเลิกการรอ</Text>
+                </TouchableOpacity>
+              )}
               {state.interests.length === 0 && (
                 <Text style={styles.actionWarn}>แนะนำให้เลือกความสนใจก่อน เพื่อจับคู่ได้ตรงใจขึ้น</Text>
               )}
@@ -445,6 +481,20 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: COLORS.accent,
     textAlign: 'center',
+  },
+  cancelWaitButton: {
+    marginTop: SPACING.md,
+    paddingHorizontal: SPACING.lg,
+    paddingVertical: 10,
+    borderRadius: ROUNDED.full,
+    backgroundColor: 'rgba(231, 76, 60, 0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(231, 76, 60, 0.25)',
+  },
+  cancelWaitText: {
+    fontSize: 13,
+    fontWeight: '900',
+    color: COLORS.danger,
   },
   footer: {
     backgroundColor: 'rgba(255, 255, 255, 0.9)',

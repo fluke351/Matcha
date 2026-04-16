@@ -3,6 +3,8 @@ const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
 const { v4: uuidv4 } = require('uuid');
+const path = require('path');
+const fs = require('fs');
 
 const app = express();
 const server = http.createServer(app);
@@ -17,6 +19,20 @@ app.use(cors());
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
+
+const webDistCandidates = [
+  path.join(__dirname, '..', 'frontend', 'dist'),
+  path.join(__dirname, '..', 'frontend', 'web-build')
+];
+const webDistPath = webDistCandidates.find(p => fs.existsSync(p));
+
+if (webDistPath) {
+  app.use(express.static(webDistPath));
+  app.get('*', (req, res, next) => {
+    if (req.path.startsWith('/api') || req.path.startsWith('/socket.io')) return next();
+    res.sendFile(path.join(webDistPath, 'index.html'));
+  });
+}
 
 const PROFANITY_LIST = [
   'fuck', 'shit', 'ass', 'bitch', 'damn', 'crap',
@@ -100,6 +116,8 @@ const messages = new Map();
 const blockedUsers = new Map();
 const reports = [];
 const onlineUsers = new Set();
+const searchingUsers = new Map();
+const userSockets = new Map();
 
 function getUserById(id) {
   return users.get(id);
@@ -121,6 +139,54 @@ function buildMatchPayload(match, userId) {
       interests: partner?.interests || []
     }
   };
+}
+
+function registerSocketForUser(userId, socketId) {
+  if (!userSockets.has(userId)) userSockets.set(userId, new Set());
+  userSockets.get(userId).add(socketId);
+}
+
+function unregisterSocketForUser(userId, socketId) {
+  const set = userSockets.get(userId);
+  if (!set) return;
+  set.delete(socketId);
+  if (set.size === 0) userSockets.delete(userId);
+}
+
+function emitToUser(userId, event, payload) {
+  const set = userSockets.get(userId);
+  if (!set) return;
+  set.forEach(socketId => io.to(socketId).emit(event, payload));
+}
+
+function getSearchingCandidates(userId, lat, lng, radius) {
+  const candidates = [];
+  const currentUser = users.get(userId);
+  if (!currentUser) return candidates;
+
+  searchingUsers.forEach((search, candidateId) => {
+    if (candidateId === userId) return;
+    if (!users.has(candidateId)) return;
+    if (getActiveMatchForUser(candidateId)) return;
+    if (blockedUsers.has(userId) && blockedUsers.get(userId).has(candidateId)) return;
+    if (currentUser?.blockedBy && currentUser.blockedBy.has(candidateId)) return;
+
+    const candidateUser = users.get(candidateId);
+    if (candidateUser?.blockedBy && candidateUser.blockedBy.has(userId)) return;
+    if (!candidateUser?.isOnline) return;
+
+    const withinCurrent = isWithinRadius({ lat, lng }, candidateUser.location, radius);
+    if (!withinCurrent) return;
+
+    const withinCandidate = isWithinRadius({ lat: search.lat, lng: search.lng }, currentUser.location, search.radius);
+    if (!withinCandidate) return;
+
+    const score = calculateMatchScore(currentUser, candidateUser, { lat, lng }, radius);
+    if (score >= 0) candidates.push({ user: candidateUser, score });
+  });
+
+  candidates.sort((a, b) => b.score - a.score);
+  return candidates;
 }
 
 function getOnlineUsersInRadius(userId, lat, lng, radius, userInterests) {
@@ -243,22 +309,28 @@ app.get('/api/users/match', (req, res) => {
   const { userId, lat, lng, radius = 10 } = req.query;
   const testMode = req.query.testMode === '1' || req.query.testMode === 'true';
   const forceBot = req.query.forceBot === '1' || req.query.forceBot === 'true';
+  const cancel = req.query.cancel === '1' || req.query.cancel === 'true';
 
   if (!userId || !users.has(userId)) {
     return res.status(401).json({ success: false, error: 'User not found' });
   }
 
+  if (cancel) {
+    searchingUsers.delete(userId);
+    return res.json({ success: true, match: null, cancelled: true });
+  }
+
   const currentUser = users.get(userId);
   const existingMatch = getActiveMatchForUser(userId);
   if (existingMatch) {
+    searchingUsers.delete(userId);
     return res.json({ success: true, match: buildMatchPayload(existingMatch, userId) });
   }
   const parsedLat = parseFloat(lat);
   const parsedLng = parseFloat(lng);
   const parsedRadius = parseFloat(radius);
-  const candidates = forceBot
-    ? []
-    : getOnlineUsersInRadius(userId, parsedLat, parsedLng, parsedRadius, currentUser.interests);
+  searchingUsers.set(userId, { lat: parsedLat, lng: parsedLng, radius: parsedRadius, createdAt: Date.now() });
+  const candidates = forceBot ? [] : getSearchingCandidates(userId, parsedLat, parsedLng, parsedRadius);
 
   if (candidates.length === 0) {
     if (testMode || forceBot) {
@@ -273,11 +345,12 @@ app.get('/api/users/match', (req, res) => {
 
       matches.set(matchId, match);
       messages.set(matchId, []);
+      searchingUsers.delete(userId);
 
       return res.json({ success: true, match: buildMatchPayload(match, userId) });
     }
 
-    return res.json({ success: true, match: null, message: 'No matches found nearby' });
+    return res.json({ success: true, match: null, waiting: true });
   }
 
   const matchedUser = candidates[0].user;
@@ -292,6 +365,11 @@ app.get('/api/users/match', (req, res) => {
 
   matches.set(matchId, match);
   messages.set(matchId, []);
+  searchingUsers.delete(userId);
+  searchingUsers.delete(matchedUser.id);
+
+  emitToUser(matchedUser.id, 'match_found', buildMatchPayload(match, matchedUser.id));
+  emitToUser(userId, 'match_found', buildMatchPayload(match, userId));
 
   res.json({ success: true, match: buildMatchPayload(match, userId) });
 });
@@ -482,10 +560,16 @@ app.put('/api/users/status', (req, res) => {
 io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
 
+  socket.on('register', (userId) => {
+    socket.userId = userId;
+    registerSocketForUser(userId, socket.id);
+  });
+
   socket.on('join_match', (matchId, userId) => {
     socket.join(matchId);
     socket.matchId = matchId;
     socket.userId = userId;
+    registerSocketForUser(userId, socket.id);
 
     const user = users.get(userId);
     if (user) {
@@ -533,6 +617,7 @@ io.on('connection', (socket) => {
     console.log('User disconnected:', socket.id);
 
     if (socket.userId) {
+      unregisterSocketForUser(socket.userId, socket.id);
       const user = users.get(socket.userId);
       if (user) {
         user.isOnline = false;
