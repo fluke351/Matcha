@@ -22,7 +22,8 @@ export const authApi = {
 export const userApi = {
   updateInterests: (userId, interests) => api.put('/users/interests', { userId, interests }),
   updateLocation: (userId, lat, lng) => api.put('/users/location', { userId, lat, lng }),
-  findMatch: (userId, lat, lng, radius) => api.get('/users/match', { params: { userId, lat, lng, radius } }),
+  findMatch: (userId, lat, lng, radius, extraParams = {}) =>
+    api.get('/users/match', { params: { userId, lat, lng, radius, ...extraParams } }),
   getProfile: (id) => api.get(`/users/profile/${id}`),
 };
 

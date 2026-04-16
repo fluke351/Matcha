@@ -60,10 +60,10 @@ function calculateDistance(lat1, lon1, lat2, lon2) {
   const R = 6371;
   const dLat = (lat2 - lat1) * Math.PI / 180;
   const dLon = (lon2 - lon1) * Math.PI / 180;
-  const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
-            Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
-            Math.sin(dLon/2) * Math.sin(dLon/2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+    Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return R * c;
 }
 
@@ -105,14 +105,34 @@ function getUserById(id) {
   return users.get(id);
 }
 
+function getActiveMatchForUser(userId) {
+  return Array.from(matches.values()).find(m => m.status === 'active' && m.userIds.includes(userId)) || null;
+}
+
+function buildMatchPayload(match, userId) {
+  const partnerId = match.userIds.find(id => id !== userId);
+  const partner = users.get(partnerId);
+  return {
+    id: match.id,
+    partner: {
+      id: partner?.id || partnerId,
+      displayName: partner?.displayName || 'Unknown',
+      avatar: partner?.avatar || '🍵',
+      interests: partner?.interests || []
+    }
+  };
+}
+
 function getOnlineUsersInRadius(userId, lat, lng, radius, userInterests) {
   const candidates = [];
   const currentUser = users.get(userId);
 
   users.forEach((user, id) => {
     if (id === userId) return;
+    if (getActiveMatchForUser(id)) return;
     if (blockedUsers.has(userId) && blockedUsers.get(userId).has(id)) return;
-    if (!currentUser.blockedBy) return;
+    if (currentUser?.blockedBy && currentUser.blockedBy.has(id)) return;
+    if (user?.blockedBy && user.blockedBy.has(userId)) return;
 
     const score = calculateMatchScore(currentUser, user, { lat, lng }, radius);
     if (score >= 0) {
@@ -122,6 +142,35 @@ function getOnlineUsersInRadius(userId, lat, lng, radius, userInterests) {
 
   candidates.sort((a, b) => b.score - a.score);
   return candidates;
+}
+
+function getOrCreateTestBotForUser(userId, lat, lng, interests) {
+  const botId = `bot:${userId}`;
+  const offset = 0.0003;
+
+  const bot = users.get(botId) || {
+    id: botId,
+    guestId: botId,
+    displayName: `MatchaBot${Math.floor(Math.random() * 1000)}`,
+    avatar: '🍵',
+    interests: [],
+    location: { lat: 0, lng: 0 },
+    lastActive: new Date().toISOString(),
+    isOnline: true,
+    blockedBy: new Set(),
+    createdAt: new Date().toISOString(),
+    isTestBot: true
+  };
+
+  bot.location = { lat: parseFloat(lat) + offset, lng: parseFloat(lng) - offset };
+  bot.interests = Array.isArray(interests) ? interests : [];
+  bot.lastActive = new Date().toISOString();
+  bot.isOnline = true;
+
+  users.set(botId, bot);
+  onlineUsers.add(botId);
+
+  return bot;
 }
 
 app.post('/api/auth/guest', (req, res) => {
@@ -192,21 +241,42 @@ app.put('/api/users/location', (req, res) => {
 
 app.get('/api/users/match', (req, res) => {
   const { userId, lat, lng, radius = 10 } = req.query;
+  const testMode = req.query.testMode === '1' || req.query.testMode === 'true';
+  const forceBot = req.query.forceBot === '1' || req.query.forceBot === 'true';
 
   if (!userId || !users.has(userId)) {
     return res.status(401).json({ success: false, error: 'User not found' });
   }
 
   const currentUser = users.get(userId);
-  const candidates = getOnlineUsersInRadius(
-    userId,
-    parseFloat(lat),
-    parseFloat(lng),
-    parseFloat(radius),
-    currentUser.interests
-  );
+  const existingMatch = getActiveMatchForUser(userId);
+  if (existingMatch) {
+    return res.json({ success: true, match: buildMatchPayload(existingMatch, userId) });
+  }
+  const parsedLat = parseFloat(lat);
+  const parsedLng = parseFloat(lng);
+  const parsedRadius = parseFloat(radius);
+  const candidates = forceBot
+    ? []
+    : getOnlineUsersInRadius(userId, parsedLat, parsedLng, parsedRadius, currentUser.interests);
 
   if (candidates.length === 0) {
+    if (testMode || forceBot) {
+      const bot = getOrCreateTestBotForUser(userId, parsedLat, parsedLng, currentUser.interests);
+      const matchId = uuidv4();
+      const match = {
+        id: matchId,
+        userIds: [userId, bot.id],
+        createdAt: new Date().toISOString(),
+        status: 'active'
+      };
+
+      matches.set(matchId, match);
+      messages.set(matchId, []);
+
+      return res.json({ success: true, match: buildMatchPayload(match, userId) });
+    }
+
     return res.json({ success: true, match: null, message: 'No matches found nearby' });
   }
 
@@ -223,18 +293,7 @@ app.get('/api/users/match', (req, res) => {
   matches.set(matchId, match);
   messages.set(matchId, []);
 
-  res.json({
-    success: true,
-    match: {
-      id: matchId,
-      partner: {
-        id: matchedUser.id,
-        displayName: matchedUser.displayName,
-        avatar: matchedUser.avatar,
-        interests: matchedUser.interests
-      }
-    }
-  });
+  res.json({ success: true, match: buildMatchPayload(match, userId) });
 });
 
 app.get('/api/users/profile/:id', (req, res) => {
@@ -295,6 +354,28 @@ app.post('/api/chat/:matchId/messages', (req, res) => {
   messages.set(matchId, chatMessages);
 
   io.to(matchId).emit('new_message', message);
+
+  const otherId = match.userIds.find(id => id !== userId);
+  const otherUser = users.get(otherId);
+  const isBot = otherUser?.isTestBot || (typeof otherId === 'string' && otherId.startsWith('bot:'));
+
+  if (isBot) {
+    setTimeout(() => {
+      const replies = ['รับแล้ว 🍵', 'โอเคเลย!', 'เล่าเพิ่มหน่อยสิ', '555 เข้าใจละ', 'น่าสนใจนะ'];
+      const reply = {
+        id: uuidv4(),
+        matchId,
+        senderId: otherId,
+        content: replies[Math.floor(Math.random() * replies.length)],
+        createdAt: new Date().toISOString()
+      };
+
+      const nextMessages = messages.get(matchId) || [];
+      nextMessages.push(reply);
+      messages.set(matchId, nextMessages);
+      io.to(matchId).emit('new_message', reply);
+    }, 450);
+  }
 
   res.json({ success: true, message });
 });

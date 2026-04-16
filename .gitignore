@@ -10,9 +10,16 @@ pnpm-debug.log*
 
 .expo/
 frontend/.expo/
+frontend/.expo-home/
+frontend/.userprofile/
+frontend/.cache/
+frontend/.config/
+frontend/.localshare/
 
 web-build/
 frontend/web-build/
 
 .DS_Store
 Thumbs.db
+
+NUL

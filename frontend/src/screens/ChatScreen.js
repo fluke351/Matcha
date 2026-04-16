@@ -10,6 +10,7 @@ const ChatScreen = ({ navigation }) => {
   const [isTyping, setIsTyping] = useState(false);
   const flatListRef = useRef(null);
   const match = state.currentMatch;
+  const messages = match ? (state.messagesByMatch[match.id] || []) : [];
 
   useEffect(() => {
     if (!match) {
@@ -32,12 +33,21 @@ const ChatScreen = ({ navigation }) => {
       if (userId !== state.user.userId) setIsTyping(isTyping);
     });
 
+    (async () => {
+      try {
+        const res = await chatApi.getMessages(match.id, state.user.userId);
+        if (res.data?.success) {
+          dispatch({ type: 'SET_MESSAGES', payload: { matchId: match.id, messages: res.data.messages || [] } });
+        }
+      } catch (e) {}
+    })();
+
     return () => {
       socket.off('new_message', handleNewMessage);
       socket.off('user_typing');
       socket.disconnect();
     };
-  }, [match]);
+  }, [match, state.user?.userId]);
 
   const handleSendMessage = async () => {
     if (!inputText.trim()) return;
@@ -66,7 +76,7 @@ const ChatScreen = ({ navigation }) => {
             try {
               await chatApi.skipMatch(match.id, state.user.userId);
               dispatch({ type: 'SET_MATCH', payload: null });
-              dispatch({ type: 'SET_MESSAGES', payload: [] });
+              dispatch({ type: 'SET_MESSAGES', payload: { matchId: match.id, messages: [] } });
               navigation.navigate('Home');
             } catch (error) {
               console.error('Skip failed:', error);
@@ -154,7 +164,7 @@ const ChatScreen = ({ navigation }) => {
 
       <FlatList
         ref={flatListRef}
-        data={state.messages}
+        data={messages}
         renderItem={renderMessage}
         keyExtractor={item => item.id}
         contentContainerStyle={styles.messageList}

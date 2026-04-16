@@ -20,7 +20,7 @@ const WelcomeScreen = ({ navigation }) => {
       const response = await authApi.loginGuest();
       if (response.data.success) {
         dispatch({ type: 'SET_USER', payload: response.data });
-        navigation.navigate('Interests');
+        navigation.navigate('OnboardingProfile');
       }
     } catch (error) {
       console.error('Guest login failed:', error);

@@ -19,7 +19,7 @@ const INTERESTS = [
 
 const InterestsScreen = ({ navigation }) => {
   const { state, dispatch } = useApp();
-  const [selected, setSelected] = useState([]);
+  const [selected, setSelected] = useState(state.interests || []);
   const [loading, setLoading] = useState(false);
 
   const toggleInterest = (id) => {
