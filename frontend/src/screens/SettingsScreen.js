@@ -15,7 +15,7 @@ const SettingsScreen = ({ navigation }) => {
         style: 'destructive',
         onPress: () => {
           dispatch({ type: 'LOGOUT' });
-          navigation.reset({ index: 0, routes: [{ name: 'Welcome' }] });
+          navigation.reset({ index: 0, routes: [{ name: 'Login' }] });
         },
       },
     ]);

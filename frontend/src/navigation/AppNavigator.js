@@ -2,6 +2,8 @@ import React from 'react';
 import { NavigationContainer } from '@react-navigation/native';
 import { createStackNavigator } from '@react-navigation/stack';
 import WelcomeScreen from '../screens/WelcomeScreen';
+import LoginScreen from '../screens/LoginScreen';
+import SignupScreen from '../screens/SignupScreen';
 import OnboardingProfileScreen from '../screens/OnboardingProfileScreen';
 import InterestsScreen from '../screens/InterestsScreen';
 import HomeScreen from '../screens/HomeScreen';
@@ -26,8 +28,10 @@ export const AppNavigator = () => {
           headerShown: false,
           cardStyle: { backgroundColor: '#F8FBF9' },
         }}
-        initialRouteName="Welcome"
+        initialRouteName="Login"
       >
+        <Stack.Screen name="Login" component={LoginScreen} />
+        <Stack.Screen name="Signup" component={SignupScreen} />
         <Stack.Screen name="Welcome" component={WelcomeScreen} />
         <Stack.Screen name="OnboardingProfile" component={OnboardingProfileScreen} />
         <Stack.Screen name="Interests" component={InterestsScreen} />

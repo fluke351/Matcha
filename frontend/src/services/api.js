@@ -1,5 +1,6 @@
 import axios from 'axios';
 import io from 'socket.io-client';
+import { createClient } from '@supabase/supabase-js';
 
 const isWeb = typeof window !== 'undefined';
 const DEFAULT_API_URL = isWeb ? '/api' : 'http://localhost:3000/api';
@@ -20,6 +21,10 @@ export const api = axios.create({
 export const socket = io(SOCKET_URL || undefined, {
   autoConnect: false,
 });
+
+export const supabase = SUPABASE_URL && SUPABASE_ANON_KEY
+  ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { auth: { persistSession: true } })
+  : null;
 
 export const authApi = {
   loginGuest: () => api.post('/auth/guest'),
