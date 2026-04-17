@@ -3,6 +3,7 @@ const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
 const { v4: uuidv4 } = require('uuid');
+const { createClient } = require('@supabase/supabase-js');
 const path = require('path');
 const fs = require('fs');
 
@@ -19,6 +20,11 @@ app.use(cors());
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const supabaseAdmin = SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY
+  ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } })
+  : null;
 
 const webDistCandidates = [
   path.join(__dirname, '..', 'frontend', 'dist'),
@@ -118,6 +124,7 @@ const reports = [];
 const onlineUsers = new Set();
 const searchingUsers = new Map();
 const userSockets = new Map();
+const testBotsByUser = new Map();
 
 function getUserById(id) {
   return users.get(id);
@@ -157,6 +164,109 @@ function emitToUser(userId, event, payload) {
   const set = userSockets.get(userId);
   if (!set) return;
   set.forEach(socketId => io.to(socketId).emit(event, payload));
+}
+
+async function ensureUserInCache(userId) {
+  if (!userId) return null;
+  if (users.has(userId)) return users.get(userId);
+  if (!supabaseAdmin) return null;
+
+  const { data: profile } = await supabaseAdmin
+    .from('users')
+    .select('id,display_name,avatar_emoji,avatar_url,created_at')
+    .eq('id', userId)
+    .maybeSingle();
+
+  if (!profile?.id) return null;
+
+  const { data: interestsRows } = await supabaseAdmin
+    .from('user_interests')
+    .select('interest_id')
+    .eq('user_id', userId);
+
+  const { data: loc } = await supabaseAdmin
+    .from('user_locations')
+    .select('lat,lng,last_active,is_online')
+    .eq('user_id', userId)
+    .maybeSingle();
+
+  const user = {
+    id: profile.id,
+    guestId: null,
+    displayName: profile.display_name,
+    avatar: profile.avatar_emoji || '🍵',
+    avatarUrl: profile.avatar_url || null,
+    interests: (interestsRows || []).map(r => r.interest_id),
+    location: loc ? { lat: parseFloat(loc.lat), lng: parseFloat(loc.lng) } : { lat: 0, lng: 0 },
+    lastActive: loc?.last_active || profile.created_at || new Date().toISOString(),
+    isOnline: loc?.is_online ?? true,
+    blockedBy: new Set(),
+    createdAt: profile.created_at || new Date().toISOString()
+  };
+
+  users.set(userId, user);
+  if (user.isOnline) onlineUsers.add(userId);
+  return user;
+}
+
+async function persistUserLocation(userId, lat, lng, isOnline = true) {
+  if (!supabaseAdmin) return;
+  await supabaseAdmin
+    .from('user_locations')
+    .upsert({
+      user_id: userId,
+      lat: parseFloat(lat),
+      lng: parseFloat(lng),
+      last_active: new Date().toISOString(),
+      is_online: !!isOnline
+    }, { onConflict: 'user_id' });
+}
+
+async function persistUserInterests(userId, interests) {
+  if (!supabaseAdmin) return;
+  await supabaseAdmin.from('user_interests').delete().eq('user_id', userId);
+  const rows = (interests || []).map(interestId => ({ user_id: userId, interest_id: interestId }));
+  if (rows.length > 0) {
+    await supabaseAdmin.from('user_interests').insert(rows);
+  }
+}
+
+async function persistMatchRow(match) {
+  if (!supabaseAdmin) return;
+  const a = match.userIds[0];
+  const b = match.userIds[1];
+  const { error } = await supabaseAdmin
+    .from('matches')
+    .insert({ id: match.id, user_a: a, user_b: b, status: match.status, created_at: match.createdAt });
+
+  if (!error) return;
+
+  const { data: existing } = await supabaseAdmin
+    .from('matches')
+    .select('id,user_a,user_b,status,created_at,ended_at')
+    .or(`and(user_a.eq.${a},user_b.eq.${b}),and(user_a.eq.${b},user_b.eq.${a})`)
+    .maybeSingle();
+
+  if (existing?.id) {
+    match.id = existing.id;
+  }
+}
+
+async function fetchMessagesFromDb(matchId) {
+  if (!supabaseAdmin) return [];
+  const { data } = await supabaseAdmin
+    .from('messages')
+    .select('id,match_id,sender_id,content,created_at')
+    .eq('match_id', matchId)
+    .order('created_at', { ascending: true });
+
+  return (data || []).map(m => ({
+    id: m.id,
+    matchId: m.match_id,
+    senderId: m.sender_id,
+    content: m.content,
+    createdAt: m.created_at
+  }));
 }
 
 function getSearchingCandidates(userId, lat, lng, radius) {
@@ -210,13 +320,26 @@ function getOnlineUsersInRadius(userId, lat, lng, radius, userInterests) {
   return candidates;
 }
 
-function getOrCreateTestBotForUser(userId, lat, lng, interests) {
-  const botId = `bot:${userId}`;
+async function getOrCreateTestBotForUser(userId, lat, lng, interests) {
+  let botId = testBotsByUser.get(userId);
   const offset = 0.0003;
+
+  if (!botId && supabaseAdmin) {
+    const email = `bot_${uuidv4()}@matcha.local`;
+    const password = `${uuidv4()}${uuidv4()}`;
+    const { data } = await supabaseAdmin.auth.admin.createUser({ email, password, email_confirm: true });
+    botId = data?.user?.id || null;
+  }
+
+  if (!botId) {
+    botId = uuidv4();
+  }
+
+  testBotsByUser.set(userId, botId);
 
   const bot = users.get(botId) || {
     id: botId,
-    guestId: botId,
+    guestId: null,
     displayName: `MatchaBot${Math.floor(Math.random() * 1000)}`,
     avatar: '🍵',
     interests: [],
@@ -236,14 +359,46 @@ function getOrCreateTestBotForUser(userId, lat, lng, interests) {
   users.set(botId, bot);
   onlineUsers.add(botId);
 
+  if (supabaseAdmin) {
+    await supabaseAdmin.from('users').upsert({ id: botId, display_name: bot.displayName, avatar_emoji: bot.avatar });
+    await persistUserLocation(botId, bot.location.lat, bot.location.lng, true);
+    await persistUserInterests(botId, bot.interests);
+  }
+
   return bot;
 }
 
-app.post('/api/auth/guest', (req, res) => {
+app.post('/api/auth/guest', async (req, res) => {
   const guestId = uuidv4();
-  const userId = uuidv4();
   const displayName = generateRandomName();
   const avatar = INTERESTS[Math.floor(Math.random() * INTERESTS.length)].emoji;
+  let userId = uuidv4();
+
+  try {
+    if (supabaseAdmin) {
+      const email = `guest_${guestId}@matcha.local`;
+      const password = `${uuidv4()}${uuidv4()}`;
+      const { data, error } = await supabaseAdmin.auth.admin.createUser({
+        email,
+        password,
+        email_confirm: true
+      });
+
+      if (error || !data?.user?.id) {
+        return res.status(500).json({ success: false, error: 'Supabase create user failed' });
+      }
+
+      userId = data.user.id;
+      await supabaseAdmin.from('users').upsert({
+        id: userId,
+        display_name: displayName,
+        avatar_emoji: avatar
+      });
+      await persistUserLocation(userId, 0, 0, true);
+    }
+  } catch (e) {
+    return res.status(500).json({ success: false, error: 'Auth guest failed' });
+  }
 
   const user = {
     id: userId,
@@ -275,43 +430,46 @@ app.get('/api/interests', (req, res) => {
   res.json({ success: true, interests: INTERESTS });
 });
 
-app.put('/api/users/interests', (req, res) => {
+app.put('/api/users/interests', async (req, res) => {
   const { userId, interests } = req.body;
 
-  if (!userId || !users.has(userId)) {
+  const user = users.get(userId) || await ensureUserInCache(userId);
+  if (!userId || !user) {
     return res.status(401).json({ success: false, error: 'User not found' });
   }
 
-  const user = users.get(userId);
   user.interests = interests || [];
   user.lastActive = new Date().toISOString();
+  await persistUserInterests(userId, user.interests);
 
   res.json({ success: true, interests: user.interests });
 });
 
-app.put('/api/users/location', (req, res) => {
+app.put('/api/users/location', async (req, res) => {
   const { userId, lat, lng } = req.body;
 
-  if (!userId || !users.has(userId)) {
+  const user = users.get(userId) || await ensureUserInCache(userId);
+  if (!userId || !user) {
     return res.status(401).json({ success: false, error: 'User not found' });
   }
 
-  const user = users.get(userId);
   user.location = { lat: parseFloat(lat), lng: parseFloat(lng) };
   user.lastActive = new Date().toISOString();
   user.isOnline = true;
   onlineUsers.add(userId);
+  await persistUserLocation(userId, user.location.lat, user.location.lng, true);
 
   res.json({ success: true });
 });
 
-app.get('/api/users/match', (req, res) => {
+app.get('/api/users/match', async (req, res) => {
   const { userId, lat, lng, radius = 10 } = req.query;
   const testMode = req.query.testMode === '1' || req.query.testMode === 'true';
   const forceBot = req.query.forceBot === '1' || req.query.forceBot === 'true';
   const cancel = req.query.cancel === '1' || req.query.cancel === 'true';
 
-  if (!userId || !users.has(userId)) {
+  const currentUser = users.get(userId) || await ensureUserInCache(userId);
+  if (!userId || !currentUser) {
     return res.status(401).json({ success: false, error: 'User not found' });
   }
 
@@ -320,8 +478,28 @@ app.get('/api/users/match', (req, res) => {
     return res.json({ success: true, match: null, cancelled: true });
   }
 
-  const currentUser = users.get(userId);
-  const existingMatch = getActiveMatchForUser(userId);
+  let existingMatch = getActiveMatchForUser(userId);
+  if (!existingMatch && supabaseAdmin) {
+    const { data: m } = await supabaseAdmin
+      .from('matches')
+      .select('id,user_a,user_b,status,created_at')
+      .eq('status', 'active')
+      .or(`user_a.eq.${userId},user_b.eq.${userId}`)
+      .order('created_at', { ascending: false })
+      .maybeSingle();
+
+    if (m?.id) {
+      existingMatch = {
+        id: m.id,
+        userIds: [m.user_a, m.user_b],
+        createdAt: m.created_at,
+        status: m.status
+      };
+      matches.set(existingMatch.id, existingMatch);
+      const partnerId = existingMatch.userIds.find(id => id !== userId);
+      if (partnerId) await ensureUserInCache(partnerId);
+    }
+  }
   if (existingMatch) {
     searchingUsers.delete(userId);
     return res.json({ success: true, match: buildMatchPayload(existingMatch, userId) });
@@ -334,7 +512,7 @@ app.get('/api/users/match', (req, res) => {
 
   if (candidates.length === 0) {
     if (testMode || forceBot) {
-      const bot = getOrCreateTestBotForUser(userId, parsedLat, parsedLng, currentUser.interests);
+      const bot = await getOrCreateTestBotForUser(userId, parsedLat, parsedLng, currentUser.interests);
       const matchId = uuidv4();
       const match = {
         id: matchId,
@@ -346,6 +524,7 @@ app.get('/api/users/match', (req, res) => {
       matches.set(matchId, match);
       messages.set(matchId, []);
       searchingUsers.delete(userId);
+      await persistMatchRow(match);
 
       return res.json({ success: true, match: buildMatchPayload(match, userId) });
     }
@@ -367,6 +546,7 @@ app.get('/api/users/match', (req, res) => {
   messages.set(matchId, []);
   searchingUsers.delete(userId);
   searchingUsers.delete(matchedUser.id);
+  await persistMatchRow(match);
 
   emitToUser(matchedUser.id, 'match_found', buildMatchPayload(match, matchedUser.id));
   emitToUser(userId, 'match_found', buildMatchPayload(match, userId));
@@ -374,9 +554,9 @@ app.get('/api/users/match', (req, res) => {
   res.json({ success: true, match: buildMatchPayload(match, userId) });
 });
 
-app.get('/api/users/profile/:id', (req, res) => {
+app.get('/api/users/profile/:id', async (req, res) => {
   const userId = req.params.id;
-  const user = users.get(userId);
+  const user = users.get(userId) || await ensureUserInCache(userId);
 
   if (!user) {
     return res.status(404).json({ success: false, error: 'User not found' });
@@ -394,25 +574,53 @@ app.get('/api/users/profile/:id', (req, res) => {
   });
 });
 
-app.get('/api/chat/:matchId/messages', (req, res) => {
+app.get('/api/chat/:matchId/messages', async (req, res) => {
   const { matchId } = req.params;
   const { userId } = req.query;
 
-  const match = matches.get(matchId);
+  let match = matches.get(matchId);
+  if (!match && supabaseAdmin) {
+    const { data: m } = await supabaseAdmin
+      .from('matches')
+      .select('id,user_a,user_b,status,created_at')
+      .eq('id', matchId)
+      .maybeSingle();
+    if (m?.id) {
+      match = { id: m.id, userIds: [m.user_a, m.user_b], createdAt: m.created_at, status: m.status };
+      matches.set(match.id, match);
+      await ensureUserInCache(m.user_a);
+      await ensureUserInCache(m.user_b);
+    }
+  }
   if (!match || !match.userIds.includes(userId)) {
     return res.status(403).json({ success: false, error: 'Access denied' });
   }
 
-  const chatMessages = messages.get(matchId) || [];
+  let chatMessages = messages.get(matchId);
+  if (!chatMessages) {
+    chatMessages = await fetchMessagesFromDb(matchId);
+    messages.set(matchId, chatMessages);
+  }
 
   res.json({ success: true, messages: chatMessages });
 });
 
-app.post('/api/chat/:matchId/messages', (req, res) => {
+app.post('/api/chat/:matchId/messages', async (req, res) => {
   const { matchId } = req.params;
   const { userId, content } = req.body;
 
-  const match = matches.get(matchId);
+  let match = matches.get(matchId);
+  if (!match && supabaseAdmin) {
+    const { data: m } = await supabaseAdmin
+      .from('matches')
+      .select('id,user_a,user_b,status,created_at')
+      .eq('id', matchId)
+      .maybeSingle();
+    if (m?.id) {
+      match = { id: m.id, userIds: [m.user_a, m.user_b], createdAt: m.created_at, status: m.status };
+      matches.set(match.id, match);
+    }
+  }
   if (!match || !match.userIds.includes(userId)) {
     return res.status(403).json({ success: false, error: 'Access denied' });
   }
@@ -431,14 +639,24 @@ app.post('/api/chat/:matchId/messages', (req, res) => {
   chatMessages.push(message);
   messages.set(matchId, chatMessages);
 
+  if (supabaseAdmin) {
+    await supabaseAdmin.from('messages').insert({
+      id: message.id,
+      match_id: matchId,
+      sender_id: userId,
+      content: message.content,
+      created_at: message.createdAt
+    });
+  }
+
   io.to(matchId).emit('new_message', message);
 
   const otherId = match.userIds.find(id => id !== userId);
   const otherUser = users.get(otherId);
-  const isBot = otherUser?.isTestBot || (typeof otherId === 'string' && otherId.startsWith('bot:'));
+  const isBot = otherUser?.isTestBot;
 
   if (isBot) {
-    setTimeout(() => {
+    setTimeout(async () => {
       const replies = ['รับแล้ว 🍵', 'โอเคเลย!', 'เล่าเพิ่มหน่อยสิ', '555 เข้าใจละ', 'น่าสนใจนะ'];
       const reply = {
         id: uuidv4(),
@@ -451,6 +669,15 @@ app.post('/api/chat/:matchId/messages', (req, res) => {
       const nextMessages = messages.get(matchId) || [];
       nextMessages.push(reply);
       messages.set(matchId, nextMessages);
+      if (supabaseAdmin) {
+        await supabaseAdmin.from('messages').insert({
+          id: reply.id,
+          match_id: matchId,
+          sender_id: otherId,
+          content: reply.content,
+          created_at: reply.createdAt
+        });
+      }
       io.to(matchId).emit('new_message', reply);
     }, 450);
   }
@@ -458,14 +685,14 @@ app.post('/api/chat/:matchId/messages', (req, res) => {
   res.json({ success: true, message });
 });
 
-app.post('/api/block', (req, res) => {
+app.post('/api/block', async (req, res) => {
   const { userId, blockedUserId } = req.body;
 
-  if (!userId || !users.has(userId)) {
+  const user = users.get(userId) || await ensureUserInCache(userId);
+  if (!userId || !user) {
     return res.status(401).json({ success: false, error: 'User not found' });
   }
 
-  const user = users.get(userId);
   if (!user.blockedBy) {
     user.blockedBy = new Set();
   }
@@ -483,21 +710,53 @@ app.post('/api/block', (req, res) => {
     matchToEnd.status = 'ended';
   }
 
+  if (supabaseAdmin) {
+    await supabaseAdmin.from('blocks').upsert({ user_id: userId, blocked_user_id: blockedUserId });
+    if (matchToEnd) {
+      await supabaseAdmin.from('matches').update({ status: 'ended', ended_at: new Date().toISOString() }).eq('id', matchToEnd.id);
+    }
+  }
+
   res.json({ success: true });
 });
 
-app.get('/api/blocked', (req, res) => {
+app.get('/api/blocked', async (req, res) => {
   const { userId } = req.query;
 
-  if (!userId || !users.has(userId)) {
+  const user = users.get(userId) || await ensureUserInCache(userId);
+  if (!userId || !user) {
     return res.status(401).json({ success: false, error: 'User not found' });
   }
 
-  const blocked = blockedUsers.get(userId) || new Set();
-  const blockedList = Array.from(blocked).map(id => {
-    const user = users.get(id);
-    return user ? { id: user.id, displayName: user.displayName, avatar: user.avatar } : null;
-  }).filter(Boolean);
+  let blockedList = [];
+  if (supabaseAdmin) {
+    const { data: rows } = await supabaseAdmin
+      .from('blocks')
+      .select('blocked_user_id')
+      .eq('user_id', userId);
+
+    const ids = (rows || []).map(r => r.blocked_user_id);
+    if (ids.length === 0) {
+      blockedList = [];
+    } else {
+      const { data: urows } = await supabaseAdmin
+        .from('users')
+        .select('id,display_name,avatar_emoji')
+        .in('id', ids);
+      const byId = new Map((urows || []).map(u => [u.id, u]));
+      blockedList = ids.map(id => ({
+        id,
+        displayName: byId.get(id)?.display_name || 'Unknown',
+        avatar: byId.get(id)?.avatar_emoji || '🍵'
+      }));
+    }
+  } else {
+    const blocked = blockedUsers.get(userId) || new Set();
+    blockedList = Array.from(blocked).map(id => {
+      const u = users.get(id);
+      return u ? { id: u.id, displayName: u.displayName, avatar: u.avatar } : null;
+    }).filter(Boolean);
+  }
 
   res.json({ success: true, blocked: blockedList });
 });

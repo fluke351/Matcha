@@ -7,6 +7,8 @@ const DEFAULT_SOCKET_URL = isWeb ? undefined : 'http://localhost:3000';
 
 const API_URL = process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL;
 const SOCKET_URL = process.env.EXPO_PUBLIC_SOCKET_URL || DEFAULT_SOCKET_URL;
+export const SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL;
+export const SUPABASE_ANON_KEY = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY;
 
 export const api = axios.create({
   baseURL: API_URL,
