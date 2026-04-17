@@ -3,6 +3,7 @@ import { View, Text, TouchableOpacity, StyleSheet, TextInput, ActivityIndicator,
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useApp } from '../context/AppContext';
 import { supabase } from '../services/api';
+import { SUPABASE_CONFIG_ERROR } from '../services/api';
 import { COLORS, ROUNDED, SPACING } from '../theme';
 
 const SignupScreen = ({ navigation }) => {
@@ -12,6 +13,7 @@ const SignupScreen = ({ navigation }) => {
   const [password2, setPassword2] = useState('');
   const [loading, setLoading] = useState(false);
   const [is18Plus, setIs18Plus] = useState(false);
+  const [notice, setNotice] = useState('');
 
   const trimmedEmail = useMemo(() => email.trim().toLowerCase(), [email]);
   const trimmedPassword = useMemo(() => password.trim(), [password]);
@@ -19,12 +21,15 @@ const SignupScreen = ({ navigation }) => {
 
   const ensureSupabase = () => {
     if (supabase) return true;
-    Alert.alert('ตั้งค่าไม่ครบ', 'ยังไม่ได้ตั้งค่า Supabase (EXPO_PUBLIC_SUPABASE_URL / EXPO_PUBLIC_SUPABASE_ANON_KEY)');
+    const msg = SUPABASE_CONFIG_ERROR || 'ยังไม่ได้ตั้งค่า Supabase: EXPO_PUBLIC_SUPABASE_URL / EXPO_PUBLIC_SUPABASE_ANON_KEY';
+    setNotice(msg);
+    Alert.alert('ตั้งค่าไม่ครบ', msg);
     return false;
   };
 
   const guard18 = () => {
     if (is18Plus) return true;
+    setNotice('กรุณายืนยันว่าอายุ 18 ปีขึ้นไปก่อนสมัครสมาชิก');
     Alert.alert('คำเตือน', 'กรุณายืนยันว่าคุณอายุ 18 ปีขึ้นไปเพื่อใช้งานแอปนี้');
     return false;
   };
@@ -39,19 +44,23 @@ const SignupScreen = ({ navigation }) => {
     if (!guard18()) return;
     if (!ensureSupabase()) return;
     if (!trimmedEmail || !trimmedPassword) {
+      setNotice('กรุณากรอกอีเมลและรหัสผ่าน');
       Alert.alert('ข้อมูลไม่ครบ', 'กรุณากรอกอีเมลและรหัสผ่าน');
       return;
     }
     if (trimmedPassword.length < 6) {
+      setNotice('รหัสผ่านต้องยาวอย่างน้อย 6 ตัวอักษร');
       Alert.alert('รหัสผ่านสั้นเกินไป', 'กรุณาตั้งรหัสผ่านอย่างน้อย 6 ตัวอักษร');
       return;
     }
     if (trimmedPassword !== trimmedPassword2) {
+      setNotice('กรุณายืนยันรหัสผ่านให้ตรงกัน');
       Alert.alert('รหัสผ่านไม่ตรงกัน', 'กรุณายืนยันรหัสผ่านให้ตรงกัน');
       return;
     }
 
     try {
+      setNotice('');
       setLoading(true);
       const { data, error } = await supabase.auth.signUp({
         email: trimmedEmail,
@@ -59,11 +68,20 @@ const SignupScreen = ({ navigation }) => {
       });
 
       if (error) {
+        setNotice(error.message || 'สมัครสมาชิกไม่สำเร็จ');
         Alert.alert('สมัครสมาชิกไม่สำเร็จ', error.message);
         return;
       }
 
-      const userId = data?.user?.id;
+      const userId = data?.user?.id || null;
+      const hasSession = !!data?.session?.access_token;
+
+      if (!hasSession) {
+        Alert.alert('สมัครสมาชิกแล้ว', 'กรุณายืนยันอีเมลในกล่องข้อความ แล้วกลับมาล็อกอินอีกครั้ง');
+        navigation.navigate('Login');
+        return;
+      }
+
       if (userId) {
         await upsertProfile(userId);
         dispatch({
@@ -78,12 +96,9 @@ const SignupScreen = ({ navigation }) => {
           },
         });
         navigation.reset({ index: 0, routes: [{ name: 'OnboardingProfile' }] });
-        return;
       }
-
-      Alert.alert('สมัครสมาชิกแล้ว', 'กรุณายืนยันอีเมลในกล่องข้อความ แล้วกลับมาล็อกอินอีกครั้ง');
-      navigation.navigate('Login');
     } catch (e) {
+      setNotice('ไม่สามารถสมัครสมาชิกได้ กรุณาลองใหม่อีกครั้ง');
       Alert.alert('ข้อผิดพลาด', 'ไม่สามารถสมัครสมาชิกได้ กรุณาลองใหม่อีกครั้ง');
     } finally {
       setLoading(false);
@@ -97,6 +112,12 @@ const SignupScreen = ({ navigation }) => {
           <Text style={styles.title}>สมัครสมาชิก</Text>
           <Text style={styles.subtitle}>สร้างบัญชีเพื่อเริ่มหาเพื่อนใหม่</Text>
         </View>
+
+        {!!notice && (
+          <View style={styles.notice}>
+            <Text style={styles.noticeText}>{notice}</Text>
+          </View>
+        )}
 
         <View style={styles.card}>
           <Text style={styles.sectionTitle}>อีเมล</Text>
@@ -204,6 +225,21 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.06,
     shadowRadius: 18,
     elevation: 3,
+  },
+  notice: {
+    width: '100%',
+    backgroundColor: 'rgba(231, 76, 60, 0.08)',
+    borderRadius: ROUNDED.lg,
+    borderWidth: 1,
+    borderColor: 'rgba(231, 76, 60, 0.18)',
+    padding: SPACING.md,
+    marginBottom: SPACING.lg,
+  },
+  noticeText: {
+    color: COLORS.danger,
+    fontSize: 13,
+    fontWeight: '700',
+    lineHeight: 18,
   },
   sectionTitle: {
     fontSize: 12,

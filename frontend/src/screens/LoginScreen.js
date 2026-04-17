@@ -3,6 +3,7 @@ import { View, Text, TouchableOpacity, StyleSheet, TextInput, ActivityIndicator,
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useApp } from '../context/AppContext';
 import { authApi, supabase } from '../services/api';
+import { SUPABASE_CONFIG_ERROR } from '../services/api';
 import { COLORS, ROUNDED, SPACING } from '../theme';
 
 const LoginScreen = ({ navigation }) => {
@@ -11,18 +12,22 @@ const LoginScreen = ({ navigation }) => {
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [is18Plus, setIs18Plus] = useState(false);
+  const [notice, setNotice] = useState('');
 
   const trimmedEmail = useMemo(() => email.trim().toLowerCase(), [email]);
   const trimmedPassword = useMemo(() => password.trim(), [password]);
 
   const ensureSupabase = () => {
     if (supabase) return true;
-    Alert.alert('ตั้งค่าไม่ครบ', 'ยังไม่ได้ตั้งค่า Supabase (EXPO_PUBLIC_SUPABASE_URL / EXPO_PUBLIC_SUPABASE_ANON_KEY)');
+    const msg = SUPABASE_CONFIG_ERROR || 'ยังไม่ได้ตั้งค่า Supabase: EXPO_PUBLIC_SUPABASE_URL / EXPO_PUBLIC_SUPABASE_ANON_KEY';
+    setNotice(msg);
+    Alert.alert('ตั้งค่าไม่ครบ', msg);
     return false;
   };
 
   const guard18 = () => {
     if (is18Plus) return true;
+    setNotice('กรุณายืนยันว่าอายุ 18 ปีขึ้นไปก่อนใช้งาน');
     Alert.alert('คำเตือน', 'กรุณายืนยันว่าคุณอายุ 18 ปีขึ้นไปเพื่อใช้งานแอปนี้');
     return false;
   };
@@ -30,6 +35,7 @@ const LoginScreen = ({ navigation }) => {
   const handleGuestLogin = async () => {
     if (!guard18()) return;
     try {
+      setNotice('');
       setLoading(true);
       const response = await authApi.loginGuest();
       if (response.data.success) {
@@ -53,11 +59,13 @@ const LoginScreen = ({ navigation }) => {
     if (!guard18()) return;
     if (!ensureSupabase()) return;
     if (!trimmedEmail || !trimmedPassword) {
+      setNotice('กรุณากรอกอีเมลและรหัสผ่าน');
       Alert.alert('ข้อมูลไม่ครบ', 'กรุณากรอกอีเมลและรหัสผ่าน');
       return;
     }
 
     try {
+      setNotice('');
       setLoading(true);
       const { data, error } = await supabase.auth.signInWithPassword({
         email: trimmedEmail,
@@ -65,7 +73,12 @@ const LoginScreen = ({ navigation }) => {
       });
 
       if (error || !data?.user?.id) {
-        Alert.alert('ล็อกอินไม่สำเร็จ', error?.message || 'กรุณาตรวจสอบอีเมล/รหัสผ่าน');
+        const msg =
+          error?.code === 'invalid_credentials'
+            ? 'อีเมลหรือรหัสผ่านไม่ถูกต้อง หรือยังไม่ได้ยืนยันอีเมล (ถ้าเปิด Email confirmation ไว้)'
+            : (error?.message || 'กรุณาตรวจสอบอีเมล/รหัสผ่าน');
+        setNotice(msg);
+        Alert.alert('ล็อกอินไม่สำเร็จ', msg);
         return;
       }
 
@@ -89,6 +102,31 @@ const LoginScreen = ({ navigation }) => {
     }
   };
 
+  const handleResend = async () => {
+    if (!ensureSupabase()) return;
+    if (!trimmedEmail) {
+      setNotice('กรุณากรอกอีเมลก่อน');
+      Alert.alert('ข้อมูลไม่ครบ', 'กรุณากรอกอีเมลก่อน');
+      return;
+    }
+    try {
+      setLoading(true);
+      const { error } = await supabase.auth.resend({ type: 'signup', email: trimmedEmail });
+      if (error) {
+        setNotice(error.message || 'ส่งอีเมลไม่สำเร็จ');
+        Alert.alert('ส่งอีเมลไม่สำเร็จ', error.message);
+        return;
+      }
+      setNotice('ส่งอีเมลยืนยันอีกครั้งแล้ว กรุณาเช็คกล่องข้อความ');
+      Alert.alert('ส่งแล้ว', 'ส่งอีเมลยืนยันอีกครั้งแล้ว กรุณาเช็คกล่องข้อความ');
+    } catch (e) {
+      setNotice('ส่งอีเมลไม่สำเร็จ กรุณาลองใหม่อีกครั้ง');
+      Alert.alert('ข้อผิดพลาด', 'ส่งอีเมลไม่สำเร็จ กรุณาลองใหม่อีกครั้ง');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
     <SafeAreaView style={styles.container}>
       <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
@@ -99,6 +137,12 @@ const LoginScreen = ({ navigation }) => {
           <Text style={styles.title}>Matcha</Text>
           <Text style={styles.subtitle}>เข้าสู่ระบบเพื่อเริ่มหาเพื่อนใหม่</Text>
         </View>
+
+        {!!notice && (
+          <View style={styles.notice}>
+            <Text style={styles.noticeText}>{notice}</Text>
+          </View>
+        )}
 
         <View style={styles.card}>
           <Text style={styles.sectionTitle}>อีเมล</Text>
@@ -148,6 +192,15 @@ const LoginScreen = ({ navigation }) => {
               disabled={loading}
             >
               <Text style={styles.secondaryText}>สมัครสมาชิก</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[styles.linkButton, loading && styles.disabled]}
+              onPress={handleResend}
+              activeOpacity={0.85}
+              disabled={loading}
+            >
+              <Text style={styles.linkText}>ส่งอีเมลยืนยันอีกครั้ง</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -228,6 +281,21 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.06,
     shadowRadius: 18,
     elevation: 3,
+  },
+  notice: {
+    width: '100%',
+    backgroundColor: 'rgba(231, 76, 60, 0.08)',
+    borderRadius: ROUNDED.lg,
+    borderWidth: 1,
+    borderColor: 'rgba(231, 76, 60, 0.18)',
+    padding: SPACING.md,
+    marginBottom: SPACING.lg,
+  },
+  noticeText: {
+    color: COLORS.danger,
+    fontSize: 13,
+    fontWeight: '700',
+    lineHeight: 18,
   },
   sectionTitle: {
     fontSize: 12,
@@ -325,6 +393,18 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '900',
     color: COLORS.secondary,
+  },
+  linkButton: {
+    marginTop: SPACING.md,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: SPACING.sm,
+  },
+  linkText: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: COLORS.textSecondary,
+    textDecorationLine: 'underline',
   },
   disabled: {
     opacity: 0.6,

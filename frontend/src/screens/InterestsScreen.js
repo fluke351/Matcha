@@ -4,6 +4,8 @@ import { useApp } from '../context/AppContext';
 import { userApi } from '../services/api';
 import { COLORS, ROUNDED, SPACING } from '../theme';
 
+const FOOTER_HEIGHT = 88;
+
 const INTERESTS = [
   { id: 'gaming', emoji: '🎮', label: 'เล่นเกม' },
   { id: 'music', emoji: '🎵', label: 'ฟังเพลง' },
@@ -23,16 +25,22 @@ const InterestsScreen = ({ navigation }) => {
   const [loading, setLoading] = useState(false);
 
   const toggleInterest = (id) => {
-    if (selected.includes(id)) {
-      setSelected(selected.filter(i => i !== id));
-    } else {
-      setSelected([...selected, id]);
-    }
+    setSelected(prev => (
+      prev.includes(id)
+        ? prev.filter(i => i !== id)
+        : [...prev, id]
+    ));
   };
 
   const handleNext = async () => {
     if (selected.length < 3) {
       Alert.alert('เลือกความสนใจ', 'กรุณาเลือกอย่างน้อย 3 อย่างเพื่อให้แมตช์ได้แม่นยำขึ้น 🍵');
+      return;
+    }
+
+    if (!state.user?.userId) {
+      Alert.alert('ข้อผิดพลาด', 'ไม่พบข้อมูลผู้ใช้ กรุณาเข้าสู่ระบบใหม่อีกครั้ง');
+      navigation.reset({ index: 0, routes: [{ name: 'Login' }] });
       return;
     }
 
@@ -42,10 +50,14 @@ const InterestsScreen = ({ navigation }) => {
       if (response.data.success) {
         dispatch({ type: 'SET_INTERESTS', payload: selected });
         navigation.navigate('Home');
+      } else {
+        dispatch({ type: 'SET_INTERESTS', payload: selected });
+        navigation.navigate('Home');
       }
     } catch (error) {
       console.error('Update interests failed:', error);
-      Alert.alert('ข้อผิดพลาด', 'ไม่สามารถบันทึกข้อมูลได้ กรุณาลองใหม่อีกครั้ง');
+      dispatch({ type: 'SET_INTERESTS', payload: selected });
+      navigation.navigate('Home');
     } finally {
       setLoading(false);
     }
@@ -86,6 +98,7 @@ const InterestsScreen = ({ navigation }) => {
           data={INTERESTS}
           renderItem={renderItem}
           keyExtractor={item => item.id}
+          extraData={selected}
           numColumns={2}
           contentContainerStyle={styles.list}
           columnWrapperStyle={styles.row}
@@ -145,7 +158,7 @@ const styles = StyleSheet.create({
     lineHeight: 22,
   },
   list: {
-    paddingBottom: SPACING.xl,
+    paddingBottom: FOOTER_HEIGHT + SPACING.xl,
   },
   row: {
     justifyContent: 'space-between',
@@ -184,7 +197,13 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
   },
   footer: {
-    paddingVertical: SPACING.lg,
+    position: 'absolute',
+    left: SPACING.lg,
+    right: SPACING.lg,
+    bottom: SPACING.lg,
+    height: FOOTER_HEIGHT,
+    justifyContent: 'center',
+    zIndex: 10,
   },
   button: {
     backgroundColor: COLORS.secondary,
